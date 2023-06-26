@@ -61,21 +61,21 @@ func (tx *ydbkvTxn) get(key []byte) []byte {
 			return value
 		}
 	}
-	rs, err := tx.actor.Execute(tx.ctx, tx.queries.selectOne,
+	data, err := tx.actor.Execute(tx.ctx, tx.queries.selectOne,
 		table.NewQueryParameters(
-			table.ValueParam("k", types.BytesValue(key)),
+			table.ValueParam("$k", types.BytesValue(key)),
 		), options.WithKeepInCache(true),
 	)
 	if err != nil {
 		panic(err)
 	}
 	defer func() {
-		_ = rs.Close()
+		_ = data.Close()
 	}()
-	if rs.NextResultSet(tx.ctx) {
-		if rs.NextRow() {
+	if data.NextResultSet(tx.ctx) {
+		if data.NextRow() {
 			var value []byte
-			if err = rs.Scan(&value); err != nil {
+			if err = data.Scan(&value); err != nil {
 				panic(err)
 			}
 			return value
@@ -85,14 +85,45 @@ func (tx *ydbkvTxn) get(key []byte) []byte {
 }
 
 func (tx *ydbkvTxn) gets(keys ...[]byte) [][]byte {
+	var rs = make([][]byte, 0, len(keys))
 	if len(keys) > 128 {
-		var rs = make([][]byte, 0, len(keys))
 		for i := 0; i < len(keys); i += 128 {
 			rs = append(rs, tx.gets(keys[i:min(i+128, len(keys))]...)...)
 		}
-		return rs
+	} else {
+		input := make([]types.Value, len(keys))
+		for i, v := range keys {
+			input[i] = types.StructValue(
+				types.StructFieldValue("k", types.BytesValue(v)),
+			)
+		}
+		data, err := tx.actor.Execute(tx.ctx, tx.queries.selectSome,
+			table.NewQueryParameters(
+				table.ValueParam("$tab", types.ListValue(input...)),
+			), options.WithKeepInCache(true),
+		)
+		if err != nil {
+			panic(err)
+		}
+		defer func() {
+			_ = data.Close()
+		}()
+		if data.NextResultSet(tx.ctx) {
+			if data.CurrentResultSet().RowCount() != len(keys) {
+				panic(fmt.Errorf("logical error: query returned row count %d, expected %d",
+					data.CurrentResultSet().RowCount(), len(keys)))
+			}
+			pos := 0
+			for data.NextRow() {
+				var item []byte
+				if err = data.Scan(&item); err != nil {
+					panic(err)
+				}
+				rs[pos] = item
+			}
+		}
 	}
-	return nil
+	return rs
 }
 
 func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []byte) bool) {
@@ -146,7 +177,8 @@ func (tx *ydbkvTxn) incrBy(key []byte, value int64) int64 {
 func (tx *ydbkvTxn) delete(key []byte) {
 }
 
-func (tx *ydbkvTxn) applyChanges() {
+func (tx *ydbkvTxn) applyChanges() error {
+	return nil
 }
 
 type YdbAuthMode int
@@ -201,13 +233,23 @@ func expandQuery(tableName string, template string) string {
 
 func (c *ydbkvClient) initQueries(tableName string) {
 	c.tableName = tableName
-	c.queries.deleteAll = expandQuery(tableName, "")
-	c.queries.deleteRange = expandQuery(tableName, "")
-	c.queries.deleteSome = expandQuery(tableName, "")
-	c.queries.upsertSome = expandQuery(tableName, "")
-	c.queries.selectOne = expandQuery(tableName, `DECLARE $k AS String; SELECT v FROM {kvtable} WHERE k=$k;`)
-	c.queries.selectSome = expandQuery(tableName, "")
-	c.queries.existsPrefix = expandQuery(tableName, `DECLARE $p AS String; SELECT k FROM {kvtable} WHERE k>=$p LIMIT 1;`)
+	c.queries.deleteAll = expandQuery(tableName, `$q=(SELECT k FROM {kvtable} ORDER BY k LIMIT 200); 
+			SELECT COUNT(*) AS cnt FROM $q; 
+			DELETE FROM {kvtable} ON SELECT * FROM $q`)
+	c.queries.deleteRange = expandQuery(tableName, `DECLARE $left AS String; DECLARE $right AS String;
+			$q=(SELECT k FROM {kvtable} WHERE k>=$left AND k<$right ORDER BY k LIMIT 200);
+			SELECT COUNT(*) AS cnt FROM $q;
+			DELETE FROM {kvtable} ON SELECT * FROM $q;`)
+	c.queries.deleteSome = expandQuery(tableName, `DECLARE $tab AS List<Struct<k:String>>;
+			DELETE FROM {kvtable} ON SELECT * FROM AS_TABLE($tab);`)
+	c.queries.upsertSome = expandQuery(tableName, `DECLARE $tab AS List<Struct<k:String, v:String>>;
+			UPSERT INTO {kvtable} SELECT k, v FROM AS_TABLE($tab);`)
+	c.queries.selectOne = expandQuery(tableName, `DECLARE $k AS String; 
+			SELECT v FROM {kvtable} WHERE k=$k;`)
+	c.queries.selectSome = expandQuery(tableName, `DECLARE $tab AS List<Struct<k:String>>; 
+			SELECT b.v FROM AS_TABLE($tab) LEFT JOIN {kvtable} b ON a.k=b.k;`)
+	c.queries.existsPrefix = expandQuery(tableName, `DECLARE $p AS String; 
+			SELECT k FROM {kvtable} WHERE k>=$p LIMIT 1;`)
 }
 
 func ydbAuth(mode YdbAuthMode, q url.Values, u *url.URL) ydb.Option {
@@ -329,14 +371,24 @@ func (c *ydbkvClient) txn(f func(*kvTxn) error, retry int) error {
 
 	return c.con.Table().DoTx(
 		ydbContext,
-		func(ctx context.Context, tx table.TransactionActor) error {
+		func(ctx context.Context, tx table.TransactionActor) (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					fe, ok := r.(error)
+					if ok {
+						err = fe
+					} else {
+						err = fmt.Errorf("ydb client txn func error: %v", r)
+					}
+				}
+			}()
 			data := ydbkvTxn{&c.queries, ctx, tx, nil, nil}
-			err := f(&kvTxn{&data, 0})
+			err = f(&kvTxn{&data, 0})
 			if err != nil {
 				return err
 			}
-			data.applyChanges()
-			return nil
+			err = data.applyChanges()
+			return err
 		},
 		table.WithIdempotent(),
 	)
