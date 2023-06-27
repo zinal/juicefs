@@ -127,6 +127,53 @@ func (tx *ydbkvTxn) gets(keys ...[]byte) [][]byte {
 }
 
 func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []byte) bool) {
+	const limit int32 = 200
+	limit_p := types.Int32Value(limit)
+	begin_p := types.BytesValue(begin)
+	end_p := types.BytesValue(end)
+	initialScan := true
+	statement := tx.queries.selectRange
+	if keysOnly {
+		statement = tx.queries.selectKeyRange
+	}
+	for {
+		next := func() bool {
+			data, err := tx.actor.Execute(tx.ctx, statement,
+				table.NewQueryParameters(
+					table.ValueParam("$left", begin_p),
+					table.ValueParam("$right", end_p),
+					table.ValueParam("$limit", limit_p),
+				))
+			if err != nil {
+				panic(err)
+			}
+			defer func() {
+				_ = data.Close()
+			}()
+			var current int32 = 0
+			if data.NextResultSet(tx.ctx) {
+				for data.NextRow() {
+					var k, v []byte
+					if err = data.Scan(&k, &v); err != nil {
+						panic(err)
+					}
+					if !handler(k, v) {
+						return false
+					}
+					current++
+				}
+			}
+			return current >= limit
+		}()
+		if !next {
+			break
+		}
+		if initialScan {
+			// need "greater than" instead of "greater or equal" on further scans
+			statement = strings.ReplaceAll(statement, "WHERE k>=$left ", "WHERE k>$left ")
+			initialScan = false
+		}
+	}
 }
 
 func (tx *ydbkvTxn) exist(prefix []byte) bool {
@@ -248,14 +295,15 @@ var ydbAuthModeMap = map[string]YdbAuthMode{
 }
 
 type ydbkvQueries struct {
-	deleteAll    string
-	deleteRange  string
-	deleteSome   string
-	upsertSome   string
-	selectOne    string
-	selectSome   string
-	selectRange  string
-	existsPrefix string
+	deleteAll      string
+	deleteRange    string
+	deleteSome     string
+	upsertSome     string
+	selectOne      string
+	selectSome     string
+	selectRange    string
+	selectKeyRange string
+	existsPrefix   string
 }
 
 type ydbkvClient struct {
@@ -283,11 +331,13 @@ func expandQuery(tableName string, template string) string {
 
 func (c *ydbkvClient) initQueries(tableName string) {
 	c.tableName = tableName
-	c.queries.deleteAll = expandQuery(tableName, `$q=(SELECT k FROM {kvtable} ORDER BY k LIMIT 200); 
+	c.queries.deleteAll = expandQuery(tableName, `$q=(SELECT k FROM {kvtable} ORDER BY k LIMIT 500); 
 			SELECT COUNT(*) AS cnt FROM $q; 
 			DELETE FROM {kvtable} ON SELECT * FROM $q`)
-	c.queries.deleteRange = expandQuery(tableName, `DECLARE $left AS String; DECLARE $right AS String;
-			$q=(SELECT k FROM {kvtable} WHERE k>=$left AND k<$right ORDER BY k LIMIT 200);
+	c.queries.deleteRange = expandQuery(tableName, `DECLARE $left AS String;
+	        DECLARE $right AS String;
+			DECLARE $limit Int32;
+			$q=(SELECT k FROM {kvtable} WHERE k>=$left AND k<$right ORDER BY k LIMIT $limit);
 			SELECT COUNT(*) AS cnt FROM $q;
 			DELETE FROM {kvtable} ON SELECT * FROM $q;`)
 	c.queries.deleteSome = expandQuery(tableName, `DECLARE $tab AS List<Struct<k:String>>;
@@ -298,8 +348,16 @@ func (c *ydbkvClient) initQueries(tableName string) {
 			SELECT v FROM {kvtable} WHERE k=$k;`)
 	c.queries.selectSome = expandQuery(tableName, `DECLARE $tab AS List<Struct<k:String>>; 
 			SELECT b.v FROM AS_TABLE($tab) LEFT JOIN {kvtable} b ON a.k=b.k;`)
-	c.queries.selectRange = expandQuery(tableName, `DECLARE $left AS String; DECLARE $right AS String;
-			SELECT k, v FROM {kvtable} WHERE k>=$left AND k<$right ORDER BY k LIMIT 200;`)
+	c.queries.selectRange = expandQuery(tableName, `DECLARE $left AS String;
+	        DECLARE $right AS String;
+			DECLARE $limit Int32;
+			SELECT k, v FROM {kvtable} 
+			WHERE k>=$left AND k<$right ORDER BY k LIMIT $limit;`)
+	c.queries.selectKeyRange = expandQuery(tableName, `DECLARE $left AS String;
+	        DECLARE $right AS String;
+			DECLARE $limit Int32;
+			SELECT k, CAST(NULL AS String?) AS v FROM {kvtable} 
+			WHERE k>=$left AND k<$right ORDER BY k LIMIT $limit;`)
 	c.queries.existsPrefix = expandQuery(tableName, `DECLARE $p AS String; 
 			SELECT k FROM {kvtable} WHERE k>=$p LIMIT 1;`)
 }
