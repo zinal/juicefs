@@ -2,7 +2,7 @@
 // +build !noydbkv
 
 /*
- * JuiceFS, Copyright 2021 Juicedata, Inc.
+ * JuiceFS, Copyright 2023 Juicedata, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -332,15 +332,15 @@ func expandQuery(tableName string, template string) string {
 
 func (c *ydbkvClient) initQueries(tableName string) {
 	c.tableName = tableName
-	c.queries.deleteAll = expandQuery(tableName, `DECLARE $limit Int32;
+	c.queries.deleteAll = expandQuery(tableName, `DECLARE $limit AS Int32;
 	        $q=(SELECT k FROM {kvtable} ORDER BY k LIMIT $limit); 
-			SELECT COUNT(*) AS cnt FROM $q; 
+			SELECT CAST(COUNT(*) AS Int32) AS cnt FROM $q; 
 			DELETE FROM {kvtable} ON SELECT * FROM $q`)
 	c.queries.deleteRange = expandQuery(tableName, `DECLARE $left AS String;
 	        DECLARE $right AS String;
-			DECLARE $limit Int32;
+			DECLARE $limit AS Int32;
 			$q=(SELECT k FROM {kvtable} WHERE k>=$left AND k<$right ORDER BY k LIMIT $limit);
-			SELECT COUNT(*) AS cnt FROM $q;
+			SELECT CAST(COUNT(*) AS Int32) AS cnt FROM $q;
 			DELETE FROM {kvtable} ON SELECT * FROM $q;`)
 	c.queries.deleteSome = expandQuery(tableName, `DECLARE $tab AS List<Struct<k:String>>;
 			DELETE FROM {kvtable} ON SELECT * FROM AS_TABLE($tab);`)
@@ -349,15 +349,15 @@ func (c *ydbkvClient) initQueries(tableName string) {
 	c.queries.selectOne = expandQuery(tableName, `DECLARE $k AS String; 
 			SELECT v FROM {kvtable} WHERE k=$k;`)
 	c.queries.selectSome = expandQuery(tableName, `DECLARE $tab AS List<Struct<k:String>>; 
-			SELECT b.v FROM AS_TABLE($tab) LEFT JOIN {kvtable} b ON a.k=b.k;`)
+			SELECT b.v FROM AS_TABLE($tab) a LEFT JOIN {kvtable} b ON a.k=b.k;`)
 	c.queries.selectRange = expandQuery(tableName, `DECLARE $left AS String;
 	        DECLARE $right AS String;
-			DECLARE $limit Int32;
+			DECLARE $limit AS Int32;
 			SELECT k, v FROM {kvtable} 
 			WHERE k>=$left AND k<$right ORDER BY k LIMIT $limit;`)
 	c.queries.selectKeyRange = expandQuery(tableName, `DECLARE $left AS String;
 	        DECLARE $right AS String;
-			DECLARE $limit Int32;
+			DECLARE $limit AS Int32;
 			SELECT k, CAST(NULL AS String?) AS v FROM {kvtable} 
 			WHERE k>=$left AND k<$right ORDER BY k LIMIT $limit;`)
 	c.queries.existsPrefix = expandQuery(tableName, `DECLARE $p AS String; 
@@ -572,7 +572,9 @@ func (c *ydbkvClient) reset(prefix []byte) (err error) {
 				table.ValueParam("$limit", limit_p),
 			), options.WithKeepInCache(true))
 		} else {
-			data, err = tx.Execute(ctx, statement, table.NewQueryParameters(), options.WithKeepInCache(true))
+			data, err = tx.Execute(ctx, statement, table.NewQueryParameters(
+				table.ValueParam("$limit", limit_p),
+			), options.WithKeepInCache(true))
 		}
 		if err != nil {
 			return err
