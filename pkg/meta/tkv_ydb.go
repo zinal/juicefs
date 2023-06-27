@@ -226,7 +226,7 @@ func (tx *ydbkvTxn) applyChanges() error {
 		if err != nil {
 			return err
 		}
-		tx.vdel = make(map[string]bool)
+		tx.vdel = nil
 	}
 	if len(tx.vput) > 0 {
 		input := make([]types.Value, len(tx.vdel))
@@ -246,19 +246,29 @@ func (tx *ydbkvTxn) applyChanges() error {
 		if err != nil {
 			return err
 		}
-		tx.vput = make(map[string][]byte)
+		tx.vput = nil
 	}
 	return nil
 }
 
 func (tx *ydbkvTxn) delete(key []byte) {
+	if tx.vdel == nil {
+		tx.vdel = make(map[string]bool)
+	}
 	tx.vdel[string(key)] = true
-	delete(tx.vput, string(key))
+	if tx.vput != nil {
+		delete(tx.vput, string(key))
+	}
 }
 
 func (tx *ydbkvTxn) set(key, value []byte) {
+	if tx.vput == nil {
+		tx.vput = make(map[string][]byte)
+	}
 	tx.vput[string(key)] = value
-	delete(tx.vdel, string(key))
+	if tx.vdel != nil {
+		delete(tx.vdel, string(key))
+	}
 }
 
 func (tx *ydbkvTxn) append(key []byte, value []byte) []byte {
@@ -562,7 +572,7 @@ func (c *ydbkvClient) reset(prefix []byte) (err error) {
 	left_p := types.BytesValue(prefix)
 	right_p := types.BytesValue(nextKey(prefix))
 
-	var deletedRows int32 = 0
+	var deletedRows *int32
 	cleaner := func(ctx context.Context, tx table.TransactionActor) (err error) {
 		var data result.Result
 		if len(prefix) > 0 {
@@ -597,12 +607,12 @@ func (c *ydbkvClient) reset(prefix []byte) (err error) {
 	defer ctxCloseFn()
 
 	for { // incremental deletion cycle
-		deletedRows = 0
+		deletedRows = nil
 		err = c.con.Table().DoTx(ydbContext, cleaner, table.WithIdempotent())
 		if err != nil {
 			return err
 		}
-		if deletedRows < limit {
+		if deletedRows == nil || *deletedRows < limit {
 			break
 		}
 	}
