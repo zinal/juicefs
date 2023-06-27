@@ -33,6 +33,7 @@ import (
 	"github.com/ydb-platform/ydb-go-sdk/v3"
 	"github.com/ydb-platform/ydb-go-sdk/v3/table"
 	"github.com/ydb-platform/ydb-go-sdk/v3/table/options"
+	"github.com/ydb-platform/ydb-go-sdk/v3/table/result"
 	"github.com/ydb-platform/ydb-go-sdk/v3/table/types"
 	yc "github.com/ydb-platform/ydb-go-yc"
 )
@@ -143,7 +144,7 @@ func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []b
 					table.ValueParam("$left", begin_p),
 					table.ValueParam("$right", end_p),
 					table.ValueParam("$limit", limit_p),
-				))
+				), options.WithKeepInCache(true))
 			if err != nil {
 				panic(err)
 			}
@@ -331,7 +332,8 @@ func expandQuery(tableName string, template string) string {
 
 func (c *ydbkvClient) initQueries(tableName string) {
 	c.tableName = tableName
-	c.queries.deleteAll = expandQuery(tableName, `$q=(SELECT k FROM {kvtable} ORDER BY k LIMIT 500); 
+	c.queries.deleteAll = expandQuery(tableName, `DECLARE $limit Int32;
+	        $q=(SELECT k FROM {kvtable} ORDER BY k LIMIT $limit); 
 			SELECT COUNT(*) AS cnt FROM $q; 
 			DELETE FROM {kvtable} ON SELECT * FROM $q`)
 	c.queries.deleteRange = expandQuery(tableName, `DECLARE $left AS String;
@@ -505,21 +507,102 @@ func (c *ydbkvClient) txn(f func(*kvTxn) error, retry int) error {
 }
 
 func (c *ydbkvClient) scan(prefix []byte, handler func(key, value []byte)) error {
-	return nil
-}
+	tablePath := c.con.Scheme().Database() + "/" + c.tableName
 
-func (c *ydbkvClient) reset(prefix []byte) (err error) {
+	var keyRange *options.KeyRange
+	if len(prefix) > 0 {
+		keyRange = &options.KeyRange{
+			From: types.TupleValue(
+				types.OptionalValue(types.BytesValue(prefix)),
+			),
+			To: types.TupleValue(
+				types.OptionalValue(types.BytesValue(nextKey(prefix))),
+			),
+		}
+	}
+
 	ydbContext, ctxCloseFn := context.WithCancel(context.Background())
 	defer ctxCloseFn()
 
-	if len(prefix) == 0 {
-		// replace the table with an empty one
-		tableName := c.tableName + "_empty"
-		err = ydbCreateKvTable(ydbContext, c.con, tableName)
+	return c.con.Table().Do(ydbContext, func(ctx context.Context, s table.Session) (err error) {
+		var data result.StreamResult
+		if keyRange == nil {
+			data, err = s.StreamReadTable(ctx, tablePath, options.ReadOrdered())
+		} else {
+			data, err = s.StreamReadTable(ctx, tablePath, options.ReadOrdered(), options.ReadKeyRange(*keyRange))
+		}
 		if err != nil {
 			return err
 		}
+		defer func() {
+			_ = data.Close()
+		}()
+		for data.NextResultSet(ctx) {
+			for data.NextRow() {
+				var key, value []byte
+				if err = data.Scan(&key, &value); err != nil {
+					return err
+				}
+				handler(key, value)
+			}
+		}
 		return nil
+	})
+}
+
+func (c *ydbkvClient) reset(prefix []byte) (err error) {
+	var statement string
+	if len(prefix) > 0 {
+		statement = c.queries.deleteRange
+	} else {
+		statement = c.queries.deleteAll
+	}
+	const limit int32 = 500
+	limit_p := types.Int32Value(limit)
+	left_p := types.BytesValue(prefix)
+	right_p := types.BytesValue(nextKey(prefix))
+
+	var deletedRows int32 = 0
+	cleaner := func(ctx context.Context, tx table.TransactionActor) (err error) {
+		var data result.Result
+		if len(prefix) > 0 {
+			data, err = tx.Execute(ctx, statement, table.NewQueryParameters(
+				table.ValueParam("$left", left_p),
+				table.ValueParam("$right", right_p),
+				table.ValueParam("$limit", limit_p),
+			), options.WithKeepInCache(true))
+		} else {
+			data, err = tx.Execute(ctx, statement, table.NewQueryParameters(), options.WithKeepInCache(true))
+		}
+		if err != nil {
+			return err
+		}
+		defer func() {
+			_ = data.Close()
+		}()
+		if data.NextResultSet(ctx) && data.NextRow() {
+			err = data.Scan(&deletedRows)
+			if err != nil {
+				return err
+			}
+		} else {
+			return fmt.Errorf("missing output row count for delete statement: %s", statement)
+		}
+		return nil
+	}
+
+	ydbContext, ctxCloseFn := context.WithCancel(context.Background())
+	defer ctxCloseFn()
+
+	for { // incremental deletion cycle
+		deletedRows = 0
+		err = c.con.Table().DoTx(ydbContext, cleaner, table.WithIdempotent())
+		if err != nil {
+			return err
+		}
+		if deletedRows < limit {
+			break
+		}
 	}
 	return nil
 }
