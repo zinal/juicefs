@@ -131,13 +131,13 @@ func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []b
 
 func (tx *ydbkvTxn) exist(prefix []byte) bool {
 	if tx.vput != nil {
-		for k, _ := range tx.vput {
+		for k := range tx.vput {
 			if strings.HasPrefix(k, string(prefix)) {
 				return true
 			}
 		}
 	}
-	rs, err := tx.actor.Execute(tx.ctx, tx.queries.existsPrefix,
+	data, err := tx.actor.Execute(tx.ctx, tx.queries.existsPrefix,
 		table.NewQueryParameters(
 			table.ValueParam("p", types.BytesValue(prefix)),
 		), options.WithKeepInCache(true),
@@ -146,12 +146,12 @@ func (tx *ydbkvTxn) exist(prefix []byte) bool {
 		panic(err)
 	}
 	defer func() {
-		_ = rs.Close()
+		_ = data.Close()
 	}()
-	if rs.NextResultSet(tx.ctx) {
-		if rs.NextRow() {
+	if data.NextResultSet(tx.ctx) {
+		if data.NextRow() {
 			var key []byte
-			if err = rs.Scan(&key); err != nil {
+			if err = data.Scan(&key); err != nil {
 				panic(err)
 			}
 			return bytes.HasPrefix(key, prefix)
@@ -160,7 +160,57 @@ func (tx *ydbkvTxn) exist(prefix []byte) bool {
 	return false
 }
 
+func (tx *ydbkvTxn) applyChanges() error {
+	if len(tx.vdel) > 0 {
+		input := make([]types.Value, len(tx.vdel))
+		i := 0
+		for k := range tx.vdel {
+			input[i] = types.StructValue(
+				types.StructFieldValue("k", types.BytesValue([]byte(k))),
+			)
+			i++
+		}
+		_, err := tx.actor.Execute(tx.ctx, tx.queries.deleteSome,
+			table.NewQueryParameters(
+				table.ValueParam("$tab", types.ListValue(input...)),
+			), options.WithKeepInCache(true),
+		)
+		if err != nil {
+			return err
+		}
+		tx.vdel = make(map[string]bool)
+	}
+	if len(tx.vput) > 0 {
+		input := make([]types.Value, len(tx.vdel))
+		i := 0
+		for k, v := range tx.vput {
+			input[i] = types.StructValue(
+				types.StructFieldValue("k", types.BytesValue([]byte(k))),
+				types.StructFieldValue("v", types.BytesValue(v)),
+			)
+			i++
+		}
+		_, err := tx.actor.Execute(tx.ctx, tx.queries.upsertSome,
+			table.NewQueryParameters(
+				table.ValueParam("$tab", types.ListValue(input...)),
+			), options.WithKeepInCache(true),
+		)
+		if err != nil {
+			return err
+		}
+		tx.vput = make(map[string][]byte)
+	}
+	return nil
+}
+
+func (tx *ydbkvTxn) delete(key []byte) {
+	tx.vdel[string(key)] = true
+	delete(tx.vput, string(key))
+}
+
 func (tx *ydbkvTxn) set(key, value []byte) {
+	tx.vput[string(key)] = value
+	delete(tx.vdel, string(key))
 }
 
 func (tx *ydbkvTxn) append(key []byte, value []byte) []byte {
@@ -171,14 +221,13 @@ func (tx *ydbkvTxn) append(key []byte, value []byte) []byte {
 }
 
 func (tx *ydbkvTxn) incrBy(key []byte, value int64) int64 {
-	return 0
-}
-
-func (tx *ydbkvTxn) delete(key []byte) {
-}
-
-func (tx *ydbkvTxn) applyChanges() error {
-	return nil
+	buf := tx.get(key)
+	new := parseCounter(buf)
+	if value != 0 {
+		new += value
+		tx.set(key, packCounter(new))
+	}
+	return new
 }
 
 type YdbAuthMode int
@@ -205,6 +254,7 @@ type ydbkvQueries struct {
 	upsertSome   string
 	selectOne    string
 	selectSome   string
+	selectRange  string
 	existsPrefix string
 }
 
@@ -248,6 +298,8 @@ func (c *ydbkvClient) initQueries(tableName string) {
 			SELECT v FROM {kvtable} WHERE k=$k;`)
 	c.queries.selectSome = expandQuery(tableName, `DECLARE $tab AS List<Struct<k:String>>; 
 			SELECT b.v FROM AS_TABLE($tab) LEFT JOIN {kvtable} b ON a.k=b.k;`)
+	c.queries.selectRange = expandQuery(tableName, `DECLARE $left AS String; DECLARE $right AS String;
+			SELECT k, v FROM {kvtable} WHERE k>=$left AND k<$right ORDER BY k LIMIT 200;`)
 	c.queries.existsPrefix = expandQuery(tableName, `DECLARE $p AS String; 
 			SELECT k FROM {kvtable} WHERE k>=$p LIMIT 1;`)
 }
