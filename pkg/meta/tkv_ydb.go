@@ -51,6 +51,13 @@ type ydbkvTxn struct {
 	vdel    map[string]bool
 }
 
+func unnestBytes(v *[]byte) []byte {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+
 func (tx *ydbkvTxn) get(key []byte) []byte {
 	if tx.vdel != nil {
 		if _, found := tx.vdel[string(key)]; found {
@@ -75,56 +82,59 @@ func (tx *ydbkvTxn) get(key []byte) []byte {
 	}()
 	if data.NextResultSet(tx.ctx) {
 		if data.NextRow() {
-			var value []byte
+			var value *[]byte
 			if err = data.Scan(&value); err != nil {
 				panic(err)
 			}
-			return value
+			return unnestBytes(value)
 		}
 	}
 	return nil
 }
 
 func (tx *ydbkvTxn) gets(keys ...[]byte) [][]byte {
-	var rs = make([][]byte, 0, len(keys))
 	if len(keys) > 128 {
+		values := make([][]byte, len(keys))
 		for i := 0; i < len(keys); i += 128 {
-			rs = append(rs, tx.gets(keys[i:min(i+128, len(keys))]...)...)
+			values = append(values, tx.gets(keys[i:min(i+128, len(keys))]...)...)
 		}
-	} else {
-		input := make([]types.Value, len(keys))
-		for i, v := range keys {
-			input[i] = types.StructValue(
-				types.StructFieldValue("k", types.BytesValue(v)),
-			)
-		}
-		data, err := tx.actor.Execute(tx.ctx, tx.queries.selectSome,
-			table.NewQueryParameters(
-				table.ValueParam("$tab", types.ListValue(input...)),
-			), options.WithKeepInCache(true),
-		)
-		if err != nil {
-			panic(err)
-		}
-		defer func() {
-			_ = data.Close()
-		}()
-		if data.NextResultSet(tx.ctx) {
-			if data.CurrentResultSet().RowCount() != len(keys) {
-				panic(fmt.Errorf("logical error: query returned row count %d, expected %d",
-					data.CurrentResultSet().RowCount(), len(keys)))
-			}
-			pos := 0
-			for data.NextRow() {
-				var item []byte
-				if err = data.Scan(&item); err != nil {
-					panic(err)
-				}
-				rs[pos] = item
-			}
-		}
+		return values
 	}
-	return rs
+	input := make([]types.Value, len(keys))
+	for i, v := range keys {
+		input[i] = types.StructValue(
+			types.StructFieldValue("k", types.BytesValue(v)),
+		)
+	}
+	data, err := tx.actor.Execute(tx.ctx, tx.queries.selectSome,
+		table.NewQueryParameters(
+			table.ValueParam("$tab", types.ListValue(input...)),
+		), options.WithKeepInCache(true),
+	)
+	if err != nil {
+		panic(err)
+	}
+	defer func() {
+		_ = data.Close()
+	}()
+	if data.NextResultSet(tx.ctx) {
+		if data.CurrentResultSet().RowCount() != len(keys) {
+			panic(fmt.Errorf("logical error: query returned row count %d, expected %d",
+				data.CurrentResultSet().RowCount(), len(keys)))
+		}
+		pos := 0
+		values := make([][]byte, 0, len(keys))
+		for data.NextRow() {
+			var item *[]byte
+			if err = data.Scan(&item); err != nil {
+				panic(err)
+			}
+			values[pos] = unnestBytes(item)
+			pos++
+		}
+		return values
+	}
+	panic("logical error: missing result set")
 }
 
 func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []byte) bool) {
@@ -154,11 +164,12 @@ func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []b
 			var current int32 = 0
 			if data.NextResultSet(tx.ctx) {
 				for data.NextRow() {
-					var k, v []byte
+					var k []byte
+					var v *[]byte
 					if err = data.Scan(&k, &v); err != nil {
 						panic(err)
 					}
-					if !handler(k, v) {
+					if !handler(k, unnestBytes(v)) {
 						return false
 					}
 					current++
@@ -229,7 +240,7 @@ func (tx *ydbkvTxn) applyChanges() error {
 		tx.vdel = nil
 	}
 	if len(tx.vput) > 0 {
-		input := make([]types.Value, len(tx.vdel))
+		input := make([]types.Value, len(tx.vput))
 		i := 0
 		for k, v := range tx.vput {
 			input[i] = types.StructValue(
@@ -494,16 +505,16 @@ func (c *ydbkvClient) txn(f func(*kvTxn) error, retry int) error {
 	return c.con.Table().DoTx(
 		ydbContext,
 		func(ctx context.Context, tx table.TransactionActor) (err error) {
-			defer func() {
-				if r := recover(); r != nil {
-					fe, ok := r.(error)
-					if ok {
-						err = fe
-					} else {
-						err = fmt.Errorf("ydb client txn func error: %v", r)
-					}
-				}
-			}()
+			/*			defer func() {
+						if r := recover(); r != nil {
+							fe, ok := r.(error)
+							if ok {
+								err = fe
+							} else {
+								err = fmt.Errorf("ydb client txn func error: %v", r)
+							}
+						}
+					}() */
 			data := ydbkvTxn{&c.queries, ctx, tx, nil, nil}
 			err = f(&kvTxn{&data, 0})
 			if err != nil {
@@ -549,11 +560,12 @@ func (c *ydbkvClient) scan(prefix []byte, handler func(key, value []byte)) error
 		}()
 		for data.NextResultSet(ctx) {
 			for data.NextRow() {
-				var key, value []byte
-				if err = data.Scan(&key, &value); err != nil {
+				var k []byte
+				var v *[]byte
+				if err = data.Scan(&k, &v); err != nil {
 					return err
 				}
-				handler(key, value)
+				handler(k, unnestBytes(v))
 			}
 		}
 		return nil
