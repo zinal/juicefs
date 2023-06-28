@@ -204,7 +204,8 @@ func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []b
 							v = &value
 						}
 					}
-					if !handler(k, unnestBytes(v)) {
+					begin = unnestBytes(v)
+					if !handler(k, begin) {
 						return false
 					}
 					current++
@@ -212,7 +213,9 @@ func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []b
 			}
 			return current >= limit
 		}()
-		if !next {
+		if next {
+			begin_p = types.BytesValue(begin)
+		} else {
 			break
 		}
 		if initialScan {
