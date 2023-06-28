@@ -22,11 +22,17 @@ import (
 )
 
 func TestMemClient(t *testing.T) { //skip mutate
-	m, err := newKVMeta("memkv", "", testConfig())
+	client, err := newTkvClient("memkv", "")
 	if err != nil {
 		t.Fatalf("create meta: %s", err)
 	}
+	m := &kvMeta{
+		baseMeta: newBaseMeta("memkv", testConfig()),
+		client:   withTracer(client, "trace-TestMemClient.txt"),
+	}
+	m.en = m
 	testMeta(t, m)
+	client.close()
 }
 
 func TestMem(t *testing.T) { //skip mutate
@@ -34,5 +40,7 @@ func TestMem(t *testing.T) { //skip mutate
 	if err != nil {
 		t.Fatal(err)
 	}
+	c = withTracer(c, "trace-TestMem.txt")
 	testTKV(t, c)
+	c.close()
 }
