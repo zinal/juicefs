@@ -22,6 +22,7 @@ package meta
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"runtime"
@@ -508,11 +509,23 @@ func (c *ydbkvClient) shouldRetry(err error) bool {
 	return false
 }
 
-func (c *ydbkvClient) txn(f func(*kvTxn) error, retry int) error {
+func deepUnwrapError(err error) error {
+	if err == nil {
+		return nil
+	}
+	err2 := errors.Unwrap(err)
+	for err2 != nil {
+		err = err2
+		err2 = errors.Unwrap(err)
+	}
+	return err
+}
+
+func (c *ydbkvClient) txn(f func(*kvTxn) error, retry int) (err error) {
 	ydbContext, ctxCloseFn := context.WithCancel(context.Background())
 	defer ctxCloseFn()
 
-	return c.con.Table().DoTx(
+	err = c.con.Table().DoTx(
 		ydbContext,
 		func(ctx context.Context, tx table.TransactionActor) (err error) {
 			defer func() {
@@ -535,6 +548,7 @@ func (c *ydbkvClient) txn(f func(*kvTxn) error, retry int) error {
 		},
 		table.WithIdempotent(),
 	)
+	return deepUnwrapError(err)
 }
 
 func (c *ydbkvClient) scan(prefix []byte, handler func(key, value []byte)) error {
