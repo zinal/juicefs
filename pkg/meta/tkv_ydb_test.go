@@ -30,8 +30,8 @@ func TestYdbClient(t *testing.T) { //skip mutate
 	// go test github.com/juicedata/juicefs/pkg/meta -run TestYdbClient -v
 	testUrl := os.Getenv("JUICEFS_YDB_URL")
 	if len(testUrl) == 0 {
-		//return
-		testUrl = "ydb.serverless.yandexcloud.net:2135/ru-central1/b1gfvslmokutuvt2g019/etnuogblap3e7dok6tf5?tls=true&authMode=saKey&saKeyFile=/home/zinal/Keys/ydb-sa1-key1.json&tableName=testJuicefs3"
+		return
+		//testUrl = "ydb.serverless.yandexcloud.net:2135/ru-central1/b1gfvslmokutuvt2g019/etnuogblap3e7dok6tf5?tls=true&authMode=saKey&saKeyFile=/home/zinal/Keys/ydb-sa1-key1.json&tableName=testJuicefs3"
 	}
 
 	client, err := newTkvClient("ydbkv", testUrl)
