@@ -597,12 +597,12 @@ func (c *ydbkvClient) scan(prefix []byte, handler func(key, value []byte)) error
 		}()
 		for data.NextResultSet(ctx) {
 			for data.NextRow() {
-				var k []byte
+				var k *[]byte
 				var v *[]byte
 				if err = data.Scan(&k, &v); err != nil {
 					return err
 				}
-				handler(k, unnestBytes(v))
+				handler(unnestBytes(k), unnestBytes(v))
 			}
 		}
 		return nil

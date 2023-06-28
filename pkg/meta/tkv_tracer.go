@@ -19,101 +19,103 @@ package meta
 import (
 	"fmt"
 	"os"
+	"sync"
 )
 
 type tracerTxn struct {
 	*kvTxn
-	trc *os.File
+	owner *tracerClient
 }
 
 func (tx *tracerTxn) get(key []byte) []byte {
-	fmt.Fprintln(tx.trc, "BEGIN get()", key)
+	tx.owner.turboLog("BEGIN get()", key)
 	out := tx.kvTxn.get(key)
-	fmt.Fprintln(tx.trc, "END out()", out)
+	tx.owner.turboLog("END out()", out)
 	return out
 }
 
 func (tx *tracerTxn) gets(keys ...[]byte) [][]byte {
-	fmt.Fprintln(tx.trc, "BEGIN gets()", keys)
+	tx.owner.turboLog("BEGIN gets()", keys)
 	out := tx.kvTxn.gets(keys...)
-	fmt.Fprintln(tx.trc, "END gets()", out)
+	tx.owner.turboLog("END gets()", out)
 	return out
 }
 
 func (tx *tracerTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []byte) bool) {
-	fmt.Fprintln(tx.trc, "BEGIN scan()", begin, end, keysOnly)
+	tx.owner.turboLog("BEGIN scan()", begin, end, keysOnly)
 	tx.kvTxn.scan(begin, end, keysOnly, func(k, v []byte) bool {
 		return handler(k, v)
 	})
-	fmt.Fprintln(tx.trc, "END scan()")
+	tx.owner.turboLog("END scan()")
 }
 
 func (tx *tracerTxn) exist(prefix []byte) bool {
-	fmt.Fprintln(tx.trc, "BEGIN append()", prefix)
+	tx.owner.turboLog("BEGIN append()", prefix)
 	out := tx.kvTxn.exist(prefix)
 	return out
 }
 
 func (tx *tracerTxn) set(key, value []byte) {
-	fmt.Fprintln(tx.trc, "BEGIN set()", key, value)
+	tx.owner.turboLog("BEGIN set()", key, value)
 	tx.kvTxn.set(key, value)
-	fmt.Fprintln(tx.trc, "END set()")
+	tx.owner.turboLog("END set()")
 }
 
 func (tx *tracerTxn) append(key []byte, value []byte) []byte {
-	fmt.Fprintln(tx.trc, "BEGIN append()", key, value)
+	tx.owner.turboLog("BEGIN append()", key, value)
 	out := tx.kvTxn.append(key, value)
-	fmt.Fprintln(tx.trc, "END append()", out)
+	tx.owner.turboLog("END append()", out)
 	return out
 }
 
 func (tx *tracerTxn) incrBy(key []byte, value int64) int64 {
-	fmt.Fprintln(tx.trc, "BEGIN incrBy()", key)
+	tx.owner.turboLog("BEGIN incrBy()", key, value)
 	out := tx.kvTxn.incrBy(key, value)
-	fmt.Fprintln(tx.trc, "END incrBy()", out)
+	tx.owner.turboLog("END incrBy()", out)
 	return out
 }
 
 func (tx *tracerTxn) delete(key []byte) {
-	fmt.Fprintln(tx.trc, "BEGIN delete()", key)
+	tx.owner.turboLog("BEGIN delete()", key)
 	tx.kvTxn.delete(key)
-	fmt.Fprintln(tx.trc, "END delete()")
+	tx.owner.turboLog("END delete()")
 }
 
 type tracerClient struct {
+	sync.Mutex
 	tkvClient
 	trc *os.File
 }
 
 func (c *tracerClient) txn(f func(*kvTxn) error, retry int) error {
-	fmt.Fprintln(c.trc, "BEGIN Ctxn()", retry)
+	c.turboLog("BEGIN Ctxn()", retry)
 	err := c.tkvClient.txn(func(tx *kvTxn) error {
-		return f(&kvTxn{&tracerTxn{tx, c.trc}, retry})
+		return f(&kvTxn{&tracerTxn{tx, c}, retry})
 	}, retry)
-	fmt.Fprintln(c.trc, "END Ctxn()", err)
+	c.turboLog("END Ctxn()", err)
 	return err
 }
 
 func (c *tracerClient) scan(prefix []byte, handler func(key, value []byte)) error {
-	fmt.Fprintln(c.trc, "BEGIN Cscan()", prefix)
+	c.turboLog("BEGIN Cscan()", prefix)
 	err := c.tkvClient.scan(prefix, func(key, value []byte) {
-		fmt.Fprintln(c.trc, "OUT Cscan()", key, value)
+		c.turboLog("OUT Cscan()", key, value)
 		handler(key, value)
 	})
-	fmt.Fprintln(c.trc, "END Cscan()", err)
+	c.turboLog("END Cscan()", err)
 	return err
 }
 
 func (c *tracerClient) reset(prefix []byte) error {
-	fmt.Fprintln(c.trc, "BEGIN Creset()", prefix)
+	c.turboLog("BEGIN Creset()", prefix)
 	err := c.tkvClient.reset(prefix)
-	fmt.Fprintln(c.trc, "END Creset()", err)
+	c.turboLog("END Creset()", err)
 	return err
 }
 
 func (c *tracerClient) close() error {
 	if c.trc != nil {
-		fmt.Fprintln(c.trc, "Tracing stopped")
+		c.turboLog("Tracing stopped")
 		c.trc.Close()
 		c.trc = nil
 	}
@@ -124,11 +126,20 @@ func (c *tracerClient) gc() {
 	c.tkvClient.gc()
 }
 
+func (c *tracerClient) turboLog(a ...any) {
+	c.Lock()
+	defer func() { c.Unlock() }()
+	if c.trc != nil {
+		fmt.Fprintln(c.trc, a...)
+	}
+}
+
 func withTracer(client tkvClient, traceFile string) tkvClient {
 	trcFile, err := os.Create(traceFile)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Fprintln(trcFile, "Tracing started")
-	return &tracerClient{client, trcFile}
+	ret := &tracerClient{sync.Mutex{}, client, trcFile}
+	ret.turboLog("Tracing started")
+	return ret
 }

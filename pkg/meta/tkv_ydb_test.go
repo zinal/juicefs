@@ -33,10 +33,16 @@ func TestYdbClient(t *testing.T) { //skip mutate
 		//return
 		testUrl = "ydb.serverless.yandexcloud.net:2135/ru-central1/b1gfvslmokutuvt2g019/etnuogblap3e7dok6tf5?tls=true&authMode=saKey&saKeyFile=/Users/mzinal/Magic/key-ydb-sa1.json&tableName=testJuicefs1"
 	}
-	m, err := newKVMeta("ydbkv", testUrl, testConfig())
+
+	client, err := newTkvClient("ydbkv", testUrl)
 	if err != nil {
 		t.Fatalf("create meta: %s", err)
 	}
+	m := &kvMeta{
+		baseMeta: newBaseMeta("ydbkv", testConfig()),
+		client:   withTracer(client, "trace-TestYdbClient.txt"),
+	}
+	m.en = m
 	testMeta(t, m)
 }
 
@@ -49,5 +55,6 @@ func TestYdb(t *testing.T) { //skip mutate
 	if err != nil {
 		t.Fatal(err)
 	}
+	c = withTracer(c, "trace-TestYdb.txt")
 	testTKV(t, c)
 }
