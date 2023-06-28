@@ -188,12 +188,17 @@ func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []b
 				_ = data.Close()
 			}()
 			var current int32 = 0
+			switched := false
 			if data.NextResultSet(tx.ctx) {
 				for data.NextRow() {
 					var k []byte
 					var v *[]byte
 					if err = data.Scan(&k, &v); err != nil {
 						panic(err)
+					}
+					if v != nil {
+						begin = unnestBytes(v)
+						switched = true
 					}
 					if tx.vdel != nil {
 						if _, found := tx.vdel[string(k)]; found {
@@ -204,14 +209,13 @@ func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []b
 							v = &value
 						}
 					}
-					begin = unnestBytes(v)
-					if !handler(k, begin) {
+					if !handler(k, unnestBytes(v)) {
 						return false
 					}
 					current++
 				}
 			}
-			return current >= limit
+			return (current >= limit) && switched
 		}()
 		if next {
 			begin_p = types.BytesValue(begin)
