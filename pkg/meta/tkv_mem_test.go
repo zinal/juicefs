@@ -26,21 +26,26 @@ func TestMemClient(t *testing.T) { //skip mutate
 	if err != nil {
 		t.Fatalf("create meta: %s", err)
 	}
+	client = withTracer(client, "trace-MemClient.txt")
+	defer func() {
+		client.close()
+	}()
 	m := &kvMeta{
 		baseMeta: newBaseMeta("memkv", testConfig()),
-		client:   withTracer(client, "trace-TestMemClient.txt"),
+		client:   client,
 	}
 	m.en = m
 	testMeta(t, m)
-	client.close()
 }
 
 func TestMem(t *testing.T) { //skip mutate
-	c, err := newMockClient("")
+	client, err := newMockClient("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	c = withTracer(c, "trace-TestMem.txt")
-	testTKV(t, c)
-	c.close()
+	client = withTracer(client, "trace-MemKv.txt")
+	defer func() {
+		client.close()
+	}()
+	testTKV(t, client)
 }

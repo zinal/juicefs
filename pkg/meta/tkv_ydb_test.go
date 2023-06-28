@@ -38,11 +38,15 @@ func TestYdbClient(t *testing.T) { //skip mutate
 	if err != nil {
 		t.Fatalf("create meta: %s", err)
 	}
+	client = withTracer(client, "trace-YdbClient.txt")
 	m := &kvMeta{
 		baseMeta: newBaseMeta("ydbkv", testConfig()),
-		client:   withTracer(client, "trace-TestYdbClient.txt"),
+		client:   client,
 	}
 	m.en = m
+	defer func() {
+		client.close()
+	}()
 	testMeta(t, m)
 }
 
@@ -51,10 +55,13 @@ func TestYdb(t *testing.T) { //skip mutate
 	if len(testUrl) == 0 {
 		return
 	}
-	c, err := newYdbClient(testUrl)
+	client, err := newYdbClient(testUrl)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c = withTracer(c, "trace-TestYdb.txt")
-	testTKV(t, c)
+	client = withTracer(client, "trace-YdbKv.txt")
+	defer func() {
+		client.close()
+	}()
+	testTKV(t, client)
 }
