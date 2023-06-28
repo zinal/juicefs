@@ -381,7 +381,7 @@ func (c *ydbkvClient) initQueries(tableName string) {
 	c.queries.selectOne = expandQuery(tableName, `DECLARE $k AS String; 
 			SELECT v FROM {kvtable} WHERE k=$k;`)
 	c.queries.selectSome = expandQuery(tableName, `DECLARE $findKeys AS List<Struct<k:String>>; 
-			SELECT b.v FROM AS_TABLE($insertPairs) a LEFT JOIN {kvtable} b ON a.k=b.k;`)
+			SELECT b.v FROM AS_TABLE($findKeys) a LEFT JOIN {kvtable} b ON a.k=b.k;`)
 	c.queries.selectRange = expandQuery(tableName, `DECLARE $left AS String;
 	        DECLARE $right AS String;
 			DECLARE $limit AS Int32;
