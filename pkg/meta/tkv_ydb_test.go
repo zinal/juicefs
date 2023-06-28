@@ -26,19 +26,19 @@ import (
 )
 
 func TestYdbClient(t *testing.T) { //skip mutate
-	// export JUICEFS_YDB_URL='ydb.serverless.yandexcloud.net:2135/ru-central1/b1gfvslmokutuvt2g019/etnuogblap3e7dok6tf5?tls=true&authMode=saKey&saKeyFile=/Users/mzinal/Magic/key-ydb-sa1.json&tableName=testJuicefs'
-	// go test github.com/juicedata/juicefs/pkg/meta -run TestYdbClient
+	// export JUICEFS_YDB_URL='ydb.serverless.yandexcloud.net:2135/ru-central1/b1gfvslmokutuvt2g019/etnuogblap3e7dok6tf5?tls=true&authMode=saKey&saKeyFile=/home/zinal/Keys/ydb-sa1-key1.json&tableName=testJuicefs2'
+	// go test github.com/juicedata/juicefs/pkg/meta -run TestYdbClient -v
 	testUrl := os.Getenv("JUICEFS_YDB_URL")
 	if len(testUrl) == 0 {
 		//return
-		testUrl = "ydb.serverless.yandexcloud.net:2135/ru-central1/b1gfvslmokutuvt2g019/etnuogblap3e7dok6tf5?tls=true&authMode=saKey&saKeyFile=/Users/mzinal/Magic/key-ydb-sa1.json&tableName=testJuicefs1"
+		testUrl = "ydb.serverless.yandexcloud.net:2135/ru-central1/b1gfvslmokutuvt2g019/etnuogblap3e7dok6tf5?tls=true&authMode=saKey&saKeyFile=/home/zinal/Keys/ydb-sa1-key1.json&tableName=testJuicefs3"
 	}
 
 	client, err := newTkvClient("ydbkv", testUrl)
 	if err != nil {
 		t.Fatalf("create meta: %s", err)
 	}
-	client = withTracer(client, "trace-YdbClient.txt")
+	//client = withTracer(client, "trace-YdbClient.txt")
 	m := &kvMeta{
 		baseMeta: newBaseMeta("ydbkv", testConfig()),
 		client:   client,
@@ -59,7 +59,7 @@ func TestYdb(t *testing.T) { //skip mutate
 	if err != nil {
 		t.Fatal(err)
 	}
-	client = withTracer(client, "trace-YdbKv.txt")
+	//client = withTracer(client, "trace-YdbKv.txt")
 	defer func() {
 		client.close()
 	}()

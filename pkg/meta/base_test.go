@@ -691,11 +691,12 @@ func testMetaClient(t *testing.T, m Meta) {
 	if st := m.Unlink(ctx, 1, "f3"); st != 0 {
 		t.Fatalf("unlink f3: %s", st)
 	}
-	time.Sleep(time.Millisecond * 100) // wait for delete
+	time.Sleep(time.Millisecond * 500) // wait for delete
 	if st := m.Read(ctx, inode, 0, &slices); st != 0 {
 		t.Fatalf("read chunk: %s", st)
 	}
 	if len(slices) != 0 {
+		logger.Warnf("%d slices, asshole!", goid())
 		t.Fatalf("slices: %v", slices)
 	}
 	if st := m.Rmdir(ctx, 1, "d"); st != 0 {

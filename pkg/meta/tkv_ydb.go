@@ -144,7 +144,15 @@ func (tx *ydbkvTxn) gets(keys ...[]byte) [][]byte {
 		}
 		values := make([][]byte, len(keys))
 		for i, k := range keys {
-			if v, ok := xmap[string(k)]; ok {
+			if tx.vdel != nil {
+				if _, found := tx.vdel[string(k)]; found {
+					values[i] = nil
+				}
+			} else if tx.vput != nil {
+				if value, found := tx.vput[string(k)]; found {
+					values[i] = value
+				}
+			} else if v, ok := xmap[string(k)]; ok {
 				values[i] = unnestBytes(v)
 			} else {
 				panic("logical error: missing input key in result set")
@@ -186,6 +194,15 @@ func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []b
 					var v *[]byte
 					if err = data.Scan(&k, &v); err != nil {
 						panic(err)
+					}
+					if tx.vdel != nil {
+						if _, found := tx.vdel[string(k)]; found {
+							v = nil
+						}
+					} else if tx.vput != nil {
+						if value, found := tx.vput[string(k)]; found {
+							v = &value
+						}
 					}
 					if !handler(k, unnestBytes(v)) {
 						return false

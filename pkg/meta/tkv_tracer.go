@@ -19,6 +19,9 @@ package meta
 import (
 	"fmt"
 	"os"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -27,58 +30,79 @@ type tracerTxn struct {
 	owner *tracerClient
 }
 
+func goid() int {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	idField := strings.Fields(strings.TrimPrefix(string(buf[:n]), "goroutine "))[0]
+	id, err := strconv.Atoi(idField)
+	if err != nil {
+		panic(fmt.Sprintf("cannot get goroutine id: %v", err))
+	}
+	return id
+}
+
 func (tx *tracerTxn) get(key []byte) []byte {
-	tx.owner.turboLog("BEGIN get()", key)
+	gid := goid()
+	logger.Infof("%d BEGIN get() %v", gid, key)
 	out := tx.kvTxn.get(key)
-	tx.owner.turboLog("END out()", out)
+	logger.Infof("%d END get() %v -> %v", gid, key, out)
 	return out
 }
 
 func (tx *tracerTxn) gets(keys ...[]byte) [][]byte {
-	tx.owner.turboLog("BEGIN gets()", keys)
+	gid := goid()
+	logger.Infof("%d BEGIN gets() %v", gid, keys)
 	out := tx.kvTxn.gets(keys...)
-	tx.owner.turboLog("END gets()", out)
+	logger.Infof("%d END gets() %v", gid, out)
 	return out
 }
 
 func (tx *tracerTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []byte) bool) {
-	tx.owner.turboLog("BEGIN scan()", begin, end, keysOnly)
+	gid := goid()
+	logger.Infof("%d BEGIN scan() %v %v", gid, begin, end)
 	tx.kvTxn.scan(begin, end, keysOnly, func(k, v []byte) bool {
+		logger.Infof("%d DATA scan() %v %v", gid, k, v)
 		return handler(k, v)
 	})
-	tx.owner.turboLog("END scan()")
+	logger.Infof("%d END scan() %v %v", gid, begin, end)
 }
 
 func (tx *tracerTxn) exist(prefix []byte) bool {
-	tx.owner.turboLog("BEGIN append()", prefix)
+	gid := goid()
+	logger.Infof("%d BEGIN exists() %v", gid, prefix)
 	out := tx.kvTxn.exist(prefix)
+	logger.Infof("%d END exists() %v -> %v", gid, prefix, out)
 	return out
 }
 
 func (tx *tracerTxn) set(key, value []byte) {
-	tx.owner.turboLog("BEGIN set()", key, value)
+	gid := goid()
+	logger.Infof("%d BEGIN set() %v %v", gid, key, value)
 	tx.kvTxn.set(key, value)
-	tx.owner.turboLog("END set()")
+	logger.Infof("%d END set() %v %v", gid, key, value)
 }
 
 func (tx *tracerTxn) append(key []byte, value []byte) []byte {
-	tx.owner.turboLog("BEGIN append()", key, value)
+	gid := goid()
+	logger.Infof("%d BEGIN append() %v %v", gid, key, value)
 	out := tx.kvTxn.append(key, value)
-	tx.owner.turboLog("END append()", out)
+	logger.Infof("%d END append() %v -> %v", gid, key, out)
 	return out
 }
 
 func (tx *tracerTxn) incrBy(key []byte, value int64) int64 {
-	tx.owner.turboLog("BEGIN incrBy()", key, value)
+	gid := goid()
+	logger.Infof("%d BEGIN incrBy() %v %v", gid, key, value)
 	out := tx.kvTxn.incrBy(key, value)
-	tx.owner.turboLog("END incrBy()", out)
+	logger.Infof("%d END incrBy() %v -> %v", gid, key, out)
 	return out
 }
 
 func (tx *tracerTxn) delete(key []byte) {
-	tx.owner.turboLog("BEGIN delete()", key)
+	gid := goid()
+	logger.Infof("%d BEGIN delete() %v", gid, key)
 	tx.kvTxn.delete(key)
-	tx.owner.turboLog("END delete()")
+	logger.Infof("%d END delete() %v", gid, key)
 }
 
 type tracerClient struct {
@@ -88,34 +112,37 @@ type tracerClient struct {
 }
 
 func (c *tracerClient) txn(f func(*kvTxn) error, retry int) error {
-	c.turboLog("BEGIN Ctxn()", retry)
+	gid := goid()
+	logger.Infof("%d BEGIN Ctxn()", gid)
 	err := c.tkvClient.txn(func(tx *kvTxn) error {
 		return f(&kvTxn{&tracerTxn{tx, c}, retry})
 	}, retry)
-	c.turboLog("END Ctxn()", err)
+	logger.Infof("%d END Ctxn() %v", gid, err)
 	return err
 }
 
 func (c *tracerClient) scan(prefix []byte, handler func(key, value []byte)) error {
-	c.turboLog("BEGIN Cscan()", prefix)
+	gid := goid()
+	logger.Infof("%d BEGIN Cscan() %v", gid, prefix)
 	err := c.tkvClient.scan(prefix, func(key, value []byte) {
-		c.turboLog("OUT Cscan()", key, value)
+		logger.Infof("%d OUT Cscan() %v -> %v", gid, key, value)
 		handler(key, value)
 	})
-	c.turboLog("END Cscan()", err)
+	logger.Infof("%d END Cscan() %v", gid, err)
 	return err
 }
 
 func (c *tracerClient) reset(prefix []byte) error {
-	c.turboLog("BEGIN Creset()", prefix)
+	gid := goid()
+	logger.Infof("%d BEGIN Creset() %v", gid, prefix)
 	err := c.tkvClient.reset(prefix)
-	c.turboLog("END Creset()", err)
+	logger.Infof("%d END Creset() %v", gid, err)
 	return err
 }
 
 func (c *tracerClient) close() error {
 	if c.trc != nil {
-		c.turboLog("Tracing stopped")
+		logger.Info("Tracing stopped")
 		c.trc.Close()
 		c.trc = nil
 	}
@@ -126,6 +153,7 @@ func (c *tracerClient) gc() {
 	c.tkvClient.gc()
 }
 
+/*
 func (c *tracerClient) turboLog(a ...any) {
 	c.Lock()
 	defer func() { c.Unlock() }()
@@ -133,6 +161,7 @@ func (c *tracerClient) turboLog(a ...any) {
 		fmt.Fprintln(c.trc, a...)
 	}
 }
+*/
 
 func withTracer(client tkvClient, traceFile string) tkvClient {
 	trcFile, err := os.Create(traceFile)
@@ -140,6 +169,6 @@ func withTracer(client tkvClient, traceFile string) tkvClient {
 		panic(err)
 	}
 	ret := &tracerClient{sync.Mutex{}, client, trcFile}
-	ret.turboLog("Tracing started")
+	logger.Info("Tracing started")
 	return ret
 }
