@@ -97,6 +97,11 @@ func (tx *ydbkvTxn) gets(keys ...[]byte) [][]byte {
 	if len(keys) == 0 {
 		return nil
 	}
+	if len(keys) == 1 {
+		values := make([][]byte, 1)
+		values[0] = tx.get(keys[0])
+		return values
+	}
 	const maxPortion = 200
 	if len(keys) > maxPortion {
 		values := make([][]byte, 0, len(keys))
