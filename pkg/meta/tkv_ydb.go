@@ -93,10 +93,14 @@ func (tx *ydbkvTxn) get(key []byte) []byte {
 }
 
 func (tx *ydbkvTxn) gets(keys ...[]byte) [][]byte {
-	if len(keys) > 128 {
-		values := make([][]byte, len(keys))
-		for i := 0; i < len(keys); i += 128 {
-			values = append(values, tx.gets(keys[i:min(i+128, len(keys))]...)...)
+	if len(keys) == 0 {
+		return nil
+	}
+	const maxPortion = 200
+	if len(keys) > maxPortion {
+		values := make([][]byte, 0, len(keys))
+		for i := 0; i < len(keys); i += maxPortion {
+			values = append(values, tx.gets(keys[i:min(i+maxPortion, len(keys))]...)...)
 		}
 		return values
 	}
@@ -108,7 +112,7 @@ func (tx *ydbkvTxn) gets(keys ...[]byte) [][]byte {
 	}
 	data, err := tx.actor.Execute(tx.ctx, tx.queries.selectSome,
 		table.NewQueryParameters(
-			table.ValueParam("$tab", types.ListValue(input...)),
+			table.ValueParam("$findKeys", types.ListValue(input...)),
 		), options.WithKeepInCache(true),
 	)
 	if err != nil {
@@ -123,7 +127,7 @@ func (tx *ydbkvTxn) gets(keys ...[]byte) [][]byte {
 				data.CurrentResultSet().RowCount(), len(keys)))
 		}
 		pos := 0
-		values := make([][]byte, 0, len(keys))
+		values := make([][]byte, len(keys))
 		for data.NextRow() {
 			var item *[]byte
 			if err = data.Scan(&item); err != nil {
@@ -231,7 +235,7 @@ func (tx *ydbkvTxn) applyChanges() error {
 		}
 		_, err := tx.actor.Execute(tx.ctx, tx.queries.deleteSome,
 			table.NewQueryParameters(
-				table.ValueParam("$tab", types.ListValue(input...)),
+				table.ValueParam("$delKeys", types.ListValue(input...)),
 			), options.WithKeepInCache(true),
 		)
 		if err != nil {
@@ -243,15 +247,21 @@ func (tx *ydbkvTxn) applyChanges() error {
 		input := make([]types.Value, len(tx.vput))
 		i := 0
 		for k, v := range tx.vput {
+			var v_p types.Value
+			if v == nil {
+				v_p = types.NullValue(types.TypeBytes)
+			} else {
+				v_p = types.OptionalValue(types.BytesValue(v))
+			}
 			input[i] = types.StructValue(
 				types.StructFieldValue("k", types.BytesValue([]byte(k))),
-				types.StructFieldValue("v", types.BytesValue(v)),
+				types.StructFieldValue("v", v_p),
 			)
 			i++
 		}
 		_, err := tx.actor.Execute(tx.ctx, tx.queries.upsertSome,
 			table.NewQueryParameters(
-				table.ValueParam("$tab", types.ListValue(input...)),
+				table.ValueParam("$insertPairs", types.ListValue(input...)),
 			), options.WithKeepInCache(true),
 		)
 		if err != nil {
@@ -363,14 +373,14 @@ func (c *ydbkvClient) initQueries(tableName string) {
 			$q=(SELECT k FROM {kvtable} WHERE k>=$left AND k<$right ORDER BY k LIMIT $limit);
 			SELECT CAST(COUNT(*) AS Int32) AS cnt FROM $q;
 			DELETE FROM {kvtable} ON SELECT * FROM $q;`)
-	c.queries.deleteSome = expandQuery(tableName, `DECLARE $tab AS List<Struct<k:String>>;
-			DELETE FROM {kvtable} ON SELECT * FROM AS_TABLE($tab);`)
-	c.queries.upsertSome = expandQuery(tableName, `DECLARE $tab AS List<Struct<k:String, v:String>>;
-			UPSERT INTO {kvtable} SELECT k, v FROM AS_TABLE($tab);`)
+	c.queries.deleteSome = expandQuery(tableName, `DECLARE $delKeys AS List<Struct<k:String>>;
+			DELETE FROM {kvtable} ON SELECT * FROM AS_TABLE($delKeys);`)
+	c.queries.upsertSome = expandQuery(tableName, `DECLARE $insertPairs AS List<Struct<k:String, v:String?>>;
+			UPSERT INTO {kvtable} SELECT k, v FROM AS_TABLE($insertPairs);`)
 	c.queries.selectOne = expandQuery(tableName, `DECLARE $k AS String; 
 			SELECT v FROM {kvtable} WHERE k=$k;`)
-	c.queries.selectSome = expandQuery(tableName, `DECLARE $tab AS List<Struct<k:String>>; 
-			SELECT b.v FROM AS_TABLE($tab) a LEFT JOIN {kvtable} b ON a.k=b.k;`)
+	c.queries.selectSome = expandQuery(tableName, `DECLARE $findKeys AS List<Struct<k:String>>; 
+			SELECT b.v FROM AS_TABLE($insertPairs) a LEFT JOIN {kvtable} b ON a.k=b.k;`)
 	c.queries.selectRange = expandQuery(tableName, `DECLARE $left AS String;
 	        DECLARE $right AS String;
 			DECLARE $limit AS Int32;
@@ -505,16 +515,16 @@ func (c *ydbkvClient) txn(f func(*kvTxn) error, retry int) error {
 	return c.con.Table().DoTx(
 		ydbContext,
 		func(ctx context.Context, tx table.TransactionActor) (err error) {
-			/*			defer func() {
-						if r := recover(); r != nil {
-							fe, ok := r.(error)
-							if ok {
-								err = fe
-							} else {
-								err = fmt.Errorf("ydb client txn func error: %v", r)
-							}
-						}
-					}() */
+			defer func() {
+				if r := recover(); r != nil {
+					fe, ok := r.(error)
+					if ok {
+						err = fe
+					} else {
+						err = fmt.Errorf("ydb client txn func error: %v", r)
+					}
+				}
+			}()
 			data := ydbkvTxn{&c.queries, ctx, tx, nil, nil}
 			err = f(&kvTxn{&data, 0})
 			if err != nil {
