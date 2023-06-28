@@ -127,15 +127,23 @@ func (tx *ydbkvTxn) gets(keys ...[]byte) [][]byte {
 			panic(fmt.Errorf("logical error: query returned row count %d, expected %d",
 				data.CurrentResultSet().RowCount(), len(keys)))
 		}
-		pos := 0
-		values := make([][]byte, len(keys))
+		// build the temporary map, as keys may return in a different order
+		xmap := make(map[string]*[]byte)
 		for data.NextRow() {
-			var item *[]byte
-			if err = data.Scan(&item); err != nil {
+			var key []byte
+			var value *[]byte
+			if err = data.Scan(&key, &value); err != nil {
 				panic(err)
 			}
-			values[pos] = unnestBytes(item)
-			pos++
+			xmap[string(key)] = value
+		}
+		values := make([][]byte, len(keys))
+		for i, k := range keys {
+			if v, ok := xmap[string(k)]; ok {
+				values[i] = unnestBytes(v)
+			} else {
+				panic("logical error: missing input key in result set")
+			}
 		}
 		return values
 	}
@@ -381,7 +389,7 @@ func (c *ydbkvClient) initQueries(tableName string) {
 	c.queries.selectOne = expandQuery(tableName, `DECLARE $k AS String; 
 			SELECT v FROM {kvtable} WHERE k=$k;`)
 	c.queries.selectSome = expandQuery(tableName, `DECLARE $findKeys AS List<Struct<k:String>>; 
-			SELECT b.v FROM AS_TABLE($findKeys) a LEFT JOIN {kvtable} b ON a.k=b.k;`)
+			SELECT a.k, b.v FROM AS_TABLE($findKeys) a LEFT JOIN {kvtable} b ON a.k=b.k;`)
 	c.queries.selectRange = expandQuery(tableName, `DECLARE $left AS String;
 	        DECLARE $right AS String;
 			DECLARE $limit AS Int32;
