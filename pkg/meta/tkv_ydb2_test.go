@@ -25,44 +25,23 @@ import (
 	"testing"
 )
 
-func TestYdb(t *testing.T) { //skip mutate
-	testUrl := os.Getenv("JUICEFS_YDB_URL")
-	if len(testUrl) == 0 {
-		return
-	}
-	client, err := newYdbClient(testUrl)
-	if err != nil {
-		t.Fatal(err)
-	}
-	//client = withTracer(client, "trace-YdbKv.txt")
-	defer func() {
-		client.close()
-	}()
-	testTKV(t, client)
-}
-
-/*
 func TestYdbClient(t *testing.T) { //skip mutate
 	// export JUICEFS_YDB_URL='ydb.serverless.yandexcloud.net:2135/ru-central1/b1gfvslmokutuvt2g019/etnuogblap3e7dok6tf5?tls=true&authMode=saKey&saKeyFile=/home/zinal/Keys/ydb-sa1-key1.json&tableName=testJuicefs2&serverless=true'
 	// go test github.com/juicedata/juicefs/pkg/meta -run TestYdbClient -v
 	testUrl := os.Getenv("JUICEFS_YDB_URL")
 	if len(testUrl) == 0 {
+		t.Logf("YDB test2 skipped")
 		return
 	}
-
 	client, err := newTkvClient("ydbkv", testUrl)
 	if err != nil {
 		t.Fatalf("create meta: %s", err)
 	}
-	//client = withTracer(client, "trace-YdbClient.txt")
 	m := &kvMeta{
 		baseMeta: newBaseMeta("ydbkv", testConfig()),
 		client:   client,
 	}
 	m.en = m
-	defer func() {
-		client.close()
-	}()
+	defer client.close()
 	testMeta(t, m)
 }
-*/

@@ -1,3 +1,6 @@
+//go:build !noydbkv
+// +build !noydbkv
+
 /*
  * JuiceFS, Copyright 2023 Juicedata, Inc.
  *
@@ -18,25 +21,17 @@
 package meta
 
 import (
+	"os"
 	"testing"
 )
 
-func TestMemClient(t *testing.T) { //skip mutate
-	client, err := newTkvClient("memkv", "")
-	if err != nil {
-		t.Fatalf("create meta: %s", err)
+func TestYdb(t *testing.T) { //skip mutate
+	testUrl := os.Getenv("JUICEFS_YDB_URL")
+	if len(testUrl) == 0 {
+		t.Logf("YDB test1 skipped")
+		return
 	}
-	defer client.close()
-	m := &kvMeta{
-		baseMeta: newBaseMeta("memkv", testConfig()),
-		client:   client,
-	}
-	m.en = m
-	testMeta(t, m)
-}
-
-func TestMem(t *testing.T) { //skip mutate
-	client, err := newMockClient("")
+	client, err := newYdbClient(testUrl)
 	if err != nil {
 		t.Fatal(err)
 	}
