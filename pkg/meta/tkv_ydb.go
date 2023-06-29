@@ -48,7 +48,9 @@ func init() {
 type ydbkvTxn struct {
 	queries *ydbkvQueries
 	ctx     context.Context
-	actor   table.TransactionActor
+	sess    table.Session
+	txc     *table.TransactionControl
+	trans   table.Transaction
 	vput    map[string][]byte
 	vdel    map[string]bool
 }
@@ -81,11 +83,26 @@ func (tx *ydbkvTxn) getValue2(k []byte, v *[]byte) ([]byte, bool) {
 	return tx.getValue1(k, *v)
 }
 
+func (tx *ydbkvTxn) getTxControl() *table.TransactionControl {
+	if tx.txc != nil {
+		return tx.txc
+	}
+	return table.SerializableReadWriteTxControl()
+}
+
+func (tx *ydbkvTxn) updateTxControl(trans table.Transaction) {
+	if tx.txc == nil {
+		tx.txc = table.SerializableReadWriteTxControl(table.WithTx(trans))
+		tx.trans = trans
+	}
+}
+
 func (tx *ydbkvTxn) get(key []byte) []byte {
 	if value, replace := tx.getValue1(key, nil); replace {
 		return value
 	}
-	data, err := tx.actor.Execute(tx.ctx, tx.queries.selectOne,
+	trans, data, err := tx.sess.Execute(tx.ctx, tx.getTxControl(),
+		tx.queries.selectOne,
 		table.NewQueryParameters(
 			table.ValueParam("$k", types.BytesValue(key)),
 		), options.WithKeepInCache(true),
@@ -93,9 +110,8 @@ func (tx *ydbkvTxn) get(key []byte) []byte {
 	if err != nil {
 		panic(err)
 	}
-	defer func() {
-		_ = data.Close()
-	}()
+	defer data.Close()
+	tx.updateTxControl(trans)
 	if data.NextResultSet(tx.ctx) {
 		if data.NextRow() {
 			var value *[]byte
@@ -131,7 +147,8 @@ func (tx *ydbkvTxn) gets(keys ...[]byte) [][]byte {
 			types.StructFieldValue("k", types.BytesValue(v)),
 		)
 	}
-	data, err := tx.actor.Execute(tx.ctx, tx.queries.selectSome,
+	trans, data, err := tx.sess.Execute(tx.ctx, tx.getTxControl(),
+		tx.queries.selectSome,
 		table.NewQueryParameters(
 			table.ValueParam("$findKeys", types.ListValue(input...)),
 		), options.WithKeepInCache(true),
@@ -139,9 +156,8 @@ func (tx *ydbkvTxn) gets(keys ...[]byte) [][]byte {
 	if err != nil {
 		panic(err)
 	}
-	defer func() {
-		_ = data.Close()
-	}()
+	defer data.Close()
+	tx.updateTxControl(trans)
 	if data.NextResultSet(tx.ctx) {
 		if data.CurrentResultSet().RowCount() != len(keys) {
 			panic(fmt.Errorf("logical error: query returned row count %d, expected %d",
@@ -182,7 +198,8 @@ func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []b
 	}
 	iterateFunc := func() bool {
 		begin_p := types.BytesValue(workBegin)
-		data, err := tx.actor.Execute(tx.ctx, statement,
+		trans, data, err := tx.sess.Execute(tx.ctx, tx.getTxControl(),
+			statement,
 			table.NewQueryParameters(
 				table.ValueParam("$left", begin_p),
 				table.ValueParam("$right", end_p),
@@ -191,9 +208,8 @@ func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []b
 		if err != nil {
 			panic(err)
 		}
-		defer func() {
-			_ = data.Close()
-		}()
+		defer data.Close()
+		tx.updateTxControl(trans)
 		var current int32 = 0
 		switched := false
 		if data.NextResultSet(tx.ctx) {
@@ -233,17 +249,17 @@ func (tx *ydbkvTxn) exist(prefix []byte) bool {
 			}
 		}
 	}
-	data, err := tx.actor.Execute(tx.ctx, tx.queries.existsPrefix,
+	trans, data, err := tx.sess.Execute(tx.ctx, tx.getTxControl(),
+		tx.queries.existsPrefix,
 		table.NewQueryParameters(
-			table.ValueParam("p", types.BytesValue(prefix)),
+			table.ValueParam("$p", types.BytesValue(prefix)),
 		), options.WithKeepInCache(true),
 	)
 	if err != nil {
 		panic(err)
 	}
-	defer func() {
-		_ = data.Close()
-	}()
+	defer data.Close()
+	tx.updateTxControl(trans)
 	if data.NextResultSet(tx.ctx) {
 		if data.NextRow() {
 			var key []byte
@@ -256,6 +272,29 @@ func (tx *ydbkvTxn) exist(prefix []byte) bool {
 	return false
 }
 
+func (tx *ydbkvTxn) commit() error {
+	if tx.trans == nil {
+		return nil
+	}
+	res, err := tx.trans.CommitTx(tx.ctx)
+	if err != nil {
+		return err
+	}
+	res.Close()
+	return nil
+}
+
+func (tx *ydbkvTxn) rollback() error {
+	if tx.trans == nil {
+		return nil
+	}
+	err := tx.trans.Rollback(tx.ctx)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (tx *ydbkvTxn) applyChanges() error {
 	if len(tx.vdel) > 0 {
 		input := make([]types.Value, len(tx.vdel))
@@ -266,7 +305,8 @@ func (tx *ydbkvTxn) applyChanges() error {
 			)
 			i++
 		}
-		_, err := tx.actor.Execute(tx.ctx, tx.queries.deleteSome,
+		trans, data, err := tx.sess.Execute(tx.ctx, tx.getTxControl(),
+			tx.queries.deleteSome,
 			table.NewQueryParameters(
 				table.ValueParam("$delKeys", types.ListValue(input...)),
 			), options.WithKeepInCache(true),
@@ -274,6 +314,8 @@ func (tx *ydbkvTxn) applyChanges() error {
 		if err != nil {
 			return err
 		}
+		tx.updateTxControl(trans)
+		data.Close()
 		tx.vdel = nil
 	}
 	if len(tx.vput) > 0 {
@@ -292,7 +334,8 @@ func (tx *ydbkvTxn) applyChanges() error {
 			)
 			i++
 		}
-		_, err := tx.actor.Execute(tx.ctx, tx.queries.upsertSome,
+		trans, data, err := tx.sess.Execute(tx.ctx, tx.getTxControl(),
+			tx.queries.upsertSome,
 			table.NewQueryParameters(
 				table.ValueParam("$insertPairs", types.ListValue(input...)),
 			), options.WithKeepInCache(true),
@@ -300,9 +343,11 @@ func (tx *ydbkvTxn) applyChanges() error {
 		if err != nil {
 			return err
 		}
+		tx.updateTxControl(trans)
+		data.Close()
 		tx.vput = nil
 	}
-	return nil
+	return tx.commit()
 }
 
 func (tx *ydbkvTxn) delete(key []byte) {
@@ -551,10 +596,9 @@ func (c *ydbkvClient) txn(f func(*kvTxn) error, retry int) error {
 
 	var algoErr error = nil
 
-	err := c.con.Table().DoTx(
-		ydbContext,
-		func(ctx context.Context, tx table.TransactionActor) error {
-			data := ydbkvTxn{&c.queries, ctx, tx, nil, nil}
+	err := c.con.Table().Do(
+		ydbContext, func(ctx context.Context, sess table.Session) error {
+			txn := ydbkvTxn{&c.queries, ctx, sess, nil, nil, nil, nil}
 			algoErr = func() (err error) {
 				defer func() {
 					if r := recover(); r != nil {
@@ -566,19 +610,24 @@ func (c *ydbkvClient) txn(f func(*kvTxn) error, retry int) error {
 						}
 					}
 				}()
-				return f(&kvTxn{&data, 0})
+				return f(&kvTxn{&txn, retry})
 			}()
 			if algoErr != nil {
 				algoErr = deepUnwrapError(algoErr)
 				if _, ok := algoErr.(syscall.Errno); ok {
 					// Avoid session drops on logical errors
-					return nil
+					return txn.commit()
 				}
+				txn.rollback()
 				return algoErr
 			}
-			return data.applyChanges()
-		},
-		table.WithIdempotent(),
+			err := txn.applyChanges() // includes commit()
+			if err != nil {
+				txn.rollback()
+				return err
+			}
+			return nil
+		}, table.WithIdempotent(),
 	)
 	if algoErr != nil {
 		return deepUnwrapError(algoErr)
