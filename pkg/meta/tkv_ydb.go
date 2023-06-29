@@ -529,6 +529,10 @@ func (c *ydbkvClient) initDo(addr string) error {
 	if len(tableName) == 0 {
 		tableName = "juicefs_kv"
 	}
+	certFile := q.Get("tlsCertFile")
+	if len(certFile) == 0 {
+		certFile = "/dev/null"
+	}
 	c.initQueries(tableName)
 
 	bconf := balancers.Default()
@@ -545,7 +549,9 @@ func (c *ydbkvClient) initDo(addr string) error {
 			ydb.WithUserAgent("juicefs"),
 			ydb.WithSessionPoolSizeLimit(poolSize),
 			ydb.WithBalancer(bconf),
-			ydb.WithSessionPoolIdleThreshold(time.Hour), ydbAuth(authMode, q, u))
+			ydb.WithSessionPoolIdleThreshold(time.Hour),
+			ydb.WithCertificatesFromFile(certFile),
+			ydbAuth(authMode, q, u))
 	}()
 	if err != nil {
 		return err
