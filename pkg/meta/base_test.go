@@ -1005,11 +1005,13 @@ func testRemove(t *testing.T, m Meta) {
 	if ps := m.GetPaths(ctx, inode); len(ps) == 0 || ps[0] != "/d/f" {
 		t.Fatalf("get path /d/f: %v", ps)
 	}
+	logger.Info("*** slow creation START")
 	for i := 0; i < 4096; i++ {
 		if st := m.Create(ctx, 1, "f"+strconv.Itoa(i), 0644, 0, 0, &inode, attr); st != 0 {
 			t.Fatalf("create f%s: %s", strconv.Itoa(i), st)
 		}
 	}
+	logger.Info("*** slow creation FINISH")
 	var entries []*Entry
 	if st := m.Readdir(ctx, 1, 1, &entries); st != 0 {
 		t.Fatalf("readdir: %s", st)
