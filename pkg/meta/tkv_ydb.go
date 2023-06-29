@@ -59,16 +59,30 @@ func unnestBytes(v *[]byte) []byte {
 	return *v
 }
 
-func (tx *ydbkvTxn) get(key []byte) []byte {
+func (tx *ydbkvTxn) getValue1(k []byte, v []byte) ([]byte, bool) {
 	if tx.vdel != nil {
-		if _, found := tx.vdel[string(key)]; found {
-			return nil
+		if _, found := tx.vdel[string(k)]; found {
+			return nil, true
 		}
 	}
 	if tx.vput != nil {
-		if value, found := tx.vput[string(key)]; found {
-			return value
+		if value, found := tx.vput[string(k)]; found {
+			return value, true
 		}
+	}
+	return v, false
+}
+
+func (tx *ydbkvTxn) getValue2(k []byte, v *[]byte) ([]byte, bool) {
+	if v == nil {
+		return tx.getValue1(k, nil)
+	}
+	return tx.getValue1(k, *v)
+}
+
+func (tx *ydbkvTxn) get(key []byte) []byte {
+	if value, replace := tx.getValue1(key, nil); replace {
+		return value
 	}
 	data, err := tx.actor.Execute(tx.ctx, tx.queries.selectOne,
 		table.NewQueryParameters(
@@ -144,16 +158,8 @@ func (tx *ydbkvTxn) gets(keys ...[]byte) [][]byte {
 		}
 		values := make([][]byte, len(keys))
 		for i, k := range keys {
-			if tx.vdel != nil {
-				if _, found := tx.vdel[string(k)]; found {
-					values[i] = nil
-				}
-			} else if tx.vput != nil {
-				if value, found := tx.vput[string(k)]; found {
-					values[i] = value
-				}
-			} else if v, ok := xmap[string(k)]; ok {
-				values[i] = unnestBytes(v)
+			if v, ok := xmap[string(k)]; ok {
+				values[i], _ = tx.getValue2(k, v)
 			} else {
 				panic("logical error: missing input key in result set")
 			}
@@ -173,9 +179,9 @@ func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []b
 	if keysOnly {
 		statement = tx.queries.selectKeyRange
 	}
-	//logger.Infof("tx.scan() ENTER %v %v", begin, end)
+	logger.Infof("tx.scan() ENTER %v %v", begin, end)
 	iterateFunc := func() bool {
-		//logger.Infof("tx.scan() ITERATION %v %v", workBegin, end)
+		logger.Infof("tx.scan() ITERATION %v %v", workBegin, end)
 		begin_p := types.BytesValue(workBegin)
 		data, err := tx.actor.Execute(tx.ctx, statement,
 			table.NewQueryParameters(
@@ -202,16 +208,8 @@ func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []b
 					workBegin = k
 					switched = true
 				}
-				if tx.vdel != nil {
-					if _, found := tx.vdel[string(k)]; found {
-						v = nil
-					}
-				} else if tx.vput != nil {
-					if value, found := tx.vput[string(k)]; found {
-						v = &value
-					}
-				}
-				if !handler(k, unnestBytes(v)) {
+				value, _ := tx.getValue2(k, v)
+				if !handler(k, value) {
 					return false
 				}
 				current++
@@ -226,7 +224,7 @@ func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []b
 			initialScan = false
 		}
 	}
-	//logger.Infof("tx.scan() EXIT %v %v", begin, end)
+	logger.Infof("tx.scan() EXIT %v %v", begin, end)
 }
 
 func (tx *ydbkvTxn) exist(prefix []byte) bool {
