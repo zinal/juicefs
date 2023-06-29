@@ -696,7 +696,6 @@ func testMetaClient(t *testing.T, m Meta) {
 		t.Fatalf("read chunk: %s", st)
 	}
 	if len(slices) != 0 {
-		logger.Warnf("%d slices, asshole!", goid())
 		t.Fatalf("slices: %v", slices)
 	}
 	if st := m.Rmdir(ctx, 1, "d"); st != 0 {
