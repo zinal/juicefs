@@ -166,68 +166,67 @@ func (tx *ydbkvTxn) gets(keys ...[]byte) [][]byte {
 func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []byte) bool) {
 	const limit int32 = 200
 	limit_p := types.Int32Value(limit)
-	begin_p := types.BytesValue(begin)
+	workBegin := begin
 	end_p := types.BytesValue(end)
 	initialScan := true
 	statement := tx.queries.selectRange
 	if keysOnly {
 		statement = tx.queries.selectKeyRange
 	}
-	for {
-		next := func() bool {
-			data, err := tx.actor.Execute(tx.ctx, statement,
-				table.NewQueryParameters(
-					table.ValueParam("$left", begin_p),
-					table.ValueParam("$right", end_p),
-					table.ValueParam("$limit", limit_p),
-				), options.WithKeepInCache(true))
-			if err != nil {
-				panic(err)
-			}
-			defer func() {
-				_ = data.Close()
-			}()
-			var current int32 = 0
-			switched := false
-			if data.NextResultSet(tx.ctx) {
-				for data.NextRow() {
-					var k []byte
-					var v *[]byte
-					if err = data.Scan(&k, &v); err != nil {
-						panic(err)
-					}
-					if v != nil {
-						begin = unnestBytes(v)
-						switched = true
-					}
-					if tx.vdel != nil {
-						if _, found := tx.vdel[string(k)]; found {
-							v = nil
-						}
-					} else if tx.vput != nil {
-						if value, found := tx.vput[string(k)]; found {
-							v = &value
-						}
-					}
-					if !handler(k, unnestBytes(v)) {
-						return false
-					}
-					current++
-				}
-			}
-			return (current >= limit) && switched
-		}()
-		if next {
-			begin_p = types.BytesValue(begin)
-		} else {
-			break
+	//logger.Infof("tx.scan() ENTER %v %v", begin, end)
+	iterateFunc := func() bool {
+		//logger.Infof("tx.scan() ITERATION %v %v", workBegin, end)
+		begin_p := types.BytesValue(workBegin)
+		data, err := tx.actor.Execute(tx.ctx, statement,
+			table.NewQueryParameters(
+				table.ValueParam("$left", begin_p),
+				table.ValueParam("$right", end_p),
+				table.ValueParam("$limit", limit_p),
+			), options.WithKeepInCache(true))
+		if err != nil {
+			panic(err)
 		}
+		defer func() {
+			_ = data.Close()
+		}()
+		var current int32 = 0
+		switched := false
+		if data.NextResultSet(tx.ctx) {
+			for data.NextRow() {
+				var k []byte
+				var v *[]byte
+				if err = data.Scan(&k, &v); err != nil {
+					panic(err)
+				}
+				if len(k) > 0 {
+					workBegin = k
+					switched = true
+				}
+				if tx.vdel != nil {
+					if _, found := tx.vdel[string(k)]; found {
+						v = nil
+					}
+				} else if tx.vput != nil {
+					if value, found := tx.vput[string(k)]; found {
+						v = &value
+					}
+				}
+				if !handler(k, unnestBytes(v)) {
+					return false
+				}
+				current++
+			}
+		}
+		return (current >= limit) && switched
+	}
+	for iterateFunc() {
 		if initialScan {
 			// need "greater than" instead of "greater or equal" on further scans
 			statement = strings.ReplaceAll(statement, "WHERE k>=$left ", "WHERE k>$left ")
 			initialScan = false
 		}
 	}
+	//logger.Infof("tx.scan() EXIT %v %v", begin, end)
 }
 
 func (tx *ydbkvTxn) exist(prefix []byte) bool {
