@@ -28,7 +28,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
+	"syscall"
 	"time"
 
 	"github.com/ydb-platform/ydb-go-sdk/v3"
@@ -116,7 +116,7 @@ func (tx *ydbkvTxn) gets(keys ...[]byte) [][]byte {
 		values[0] = tx.get(keys[0])
 		return values
 	}
-	const maxPortion = 200
+	const maxPortion = 500
 	if len(keys) > maxPortion {
 		values := make([][]byte, 0, len(keys))
 		for i := 0; i < len(keys); i += maxPortion {
@@ -170,7 +170,7 @@ func (tx *ydbkvTxn) gets(keys ...[]byte) [][]byte {
 }
 
 func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []byte) bool) {
-	const limit int32 = 200
+	const limit int32 = 500
 	limit_p := types.Int32Value(limit)
 	workBegin := begin
 	end_p := types.BytesValue(end)
@@ -179,9 +179,7 @@ func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []b
 	if keysOnly {
 		statement = tx.queries.selectKeyRange
 	}
-	logger.Infof("tx.scan() ENTER %v %v", begin, end)
 	iterateFunc := func() bool {
-		logger.Infof("tx.scan() ITERATION %v %v", workBegin, end)
 		begin_p := types.BytesValue(workBegin)
 		data, err := tx.actor.Execute(tx.ctx, statement,
 			table.NewQueryParameters(
@@ -224,7 +222,6 @@ func (tx *ydbkvTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []b
 			initialScan = false
 		}
 	}
-	logger.Infof("tx.scan() EXIT %v %v", begin, end)
 }
 
 func (tx *ydbkvTxn) exist(prefix []byte) bool {
@@ -374,22 +371,9 @@ type ydbkvQueries struct {
 }
 
 type ydbkvClient struct {
-	sync.RWMutex
-	isOpen    bool
 	con       *ydb.Driver
 	tableName string
 	queries   ydbkvQueries
-}
-
-var ydbkvInstance *ydbkvClient
-var ydbkvOnce sync.Once
-
-func ydbkv() *ydbkvClient {
-	ydbkvOnce.Do(func() {
-		ydbkvInstance = new(ydbkvClient)
-		ydbkvInstance.isOpen = false
-	})
-	return ydbkvInstance
 }
 
 func expandQuery(tableName string, template string) string {
@@ -495,43 +479,38 @@ func (c *ydbkvClient) initDo(addr string) error {
 	if len(tableName) == 0 {
 		tableName = "juicefs_kv"
 	}
-
-	ydbContext, ctxCloseFn := context.WithTimeout(context.Background(), 10*time.Second)
-	defer ctxCloseFn()
-	c.con, err = ydb.Open(ydbContext, ydbUrl,
-		ydb.WithUserAgent("juicefs"),
-		ydb.WithSessionPoolSizeLimit(5*runtime.GOMAXPROCS(-1)),
-		ydb.WithSessionPoolIdleThreshold(10*time.Minute), ydbAuth(authMode, q, u))
-	if err != nil {
-		return err
-	}
-	err = ydbCreateKvTable(ydbContext, c.con, tableName)
-	if err != nil {
-		return err
-	}
 	c.initQueries(tableName)
-	return nil
-}
 
-func (c *ydbkvClient) initIf(addr string) error {
-	c.Lock()
-	defer c.Unlock()
-	if !c.isOpen {
-		if err := c.initDo(addr); err != nil {
-			return err
-		}
-		c.isOpen = true
+	func() {
+		poolSize := 2 * runtime.GOMAXPROCS(-1)
+		logger.Infof("Connecting to YDB at %q, session pool size %v", ydbUrl, poolSize)
+		ydbContext, ctxCloseFn := context.WithTimeout(context.Background(), 10*time.Second)
+		defer ctxCloseFn()
+		c.con, err = ydb.Open(ydbContext, ydbUrl,
+			ydb.WithUserAgent("juicefs"),
+			ydb.WithSessionPoolSizeLimit(poolSize),
+			ydb.WithSessionPoolIdleThreshold(time.Hour), ydbAuth(authMode, q, u))
+	}()
+	if err != nil {
+		return err
+	}
+	func() {
+		ydbContext, ctxCloseFn := context.WithCancel(context.Background())
+		defer ctxCloseFn()
+		err = ydbCreateKvTable(ydbContext, c.con, tableName)
+	}()
+	if err != nil {
+		return err
 	}
 	return nil
 }
 
 func newYdbClient(addr string) (tkvClient, error) {
-	client := ydbkv()
-	err := client.initIf(addr)
-	if err == nil {
-		return client, nil
+	client := &ydbkvClient{}
+	if err := client.initDo(addr); err != nil {
+		return nil, err
 	}
-	return nil, err
+	return client, nil
 }
 
 func (c *ydbkvClient) name() string {
@@ -555,33 +534,44 @@ func deepUnwrapError(err error) error {
 	return err
 }
 
-func (c *ydbkvClient) txn(f func(*kvTxn) error, retry int) (err error) {
+func (c *ydbkvClient) txn(f func(*kvTxn) error, retry int) error {
 	ydbContext, ctxCloseFn := context.WithCancel(context.Background())
 	defer ctxCloseFn()
 
-	err = c.con.Table().DoTx(
+	var algoErr error = nil
+
+	err := c.con.Table().DoTx(
 		ydbContext,
-		func(ctx context.Context, tx table.TransactionActor) (err error) {
-			defer func() {
-				if r := recover(); r != nil {
-					fe, ok := r.(error)
-					if ok {
-						err = fe
-					} else {
-						err = fmt.Errorf("ydb client txn func error: %v", r)
-					}
-				}
-			}()
+		func(ctx context.Context, tx table.TransactionActor) error {
 			data := ydbkvTxn{&c.queries, ctx, tx, nil, nil}
-			err = f(&kvTxn{&data, 0})
-			if err != nil {
-				return err
+			algoErr = func() (err error) {
+				defer func() {
+					if r := recover(); r != nil {
+						fe, ok := r.(error)
+						if ok {
+							err = fe
+						} else {
+							err = fmt.Errorf("ydb client txn func error: %v", r)
+						}
+					}
+				}()
+				return f(&kvTxn{&data, 0})
+			}()
+			if algoErr != nil {
+				algoErr = deepUnwrapError(algoErr)
+				if _, ok := algoErr.(syscall.Errno); ok {
+					// Avoid session drops on logical errors
+					return nil
+				}
+				return algoErr
 			}
-			err = data.applyChanges()
-			return err
+			return data.applyChanges()
 		},
 		table.WithIdempotent(),
 	)
+	if algoErr != nil {
+		return deepUnwrapError(algoErr)
+	}
 	return deepUnwrapError(err)
 }
 
