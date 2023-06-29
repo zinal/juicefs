@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/ydb-platform/ydb-go-sdk/v3"
+	"github.com/ydb-platform/ydb-go-sdk/v3/balancers"
 	"github.com/ydb-platform/ydb-go-sdk/v3/table"
 	"github.com/ydb-platform/ydb-go-sdk/v3/table/options"
 	"github.com/ydb-platform/ydb-go-sdk/v3/table/result"
@@ -464,6 +465,10 @@ func (c *ydbkvClient) initDo(addr string) error {
 	if q.Has("tls") {
 		tls, _ = strconv.ParseBool(q.Get("tls"))
 	}
+	serverless := false
+	if q.Has("serverless") {
+		serverless, _ = strconv.ParseBool(q.Get("serverless"))
+	}
 	var ydbUrl string
 	if tls {
 		ydbUrl = "grpcs://" + u.Host + database
@@ -481,6 +486,11 @@ func (c *ydbkvClient) initDo(addr string) error {
 	}
 	c.initQueries(tableName)
 
+	bconf := balancers.Default()
+	if serverless {
+		bconf = balancers.SingleConn()
+	}
+
 	func() {
 		poolSize := 2 * runtime.GOMAXPROCS(-1)
 		logger.Infof("Connecting to YDB at %q, session pool size %v", ydbUrl, poolSize)
@@ -489,6 +499,7 @@ func (c *ydbkvClient) initDo(addr string) error {
 		c.con, err = ydb.Open(ydbContext, ydbUrl,
 			ydb.WithUserAgent("juicefs"),
 			ydb.WithSessionPoolSizeLimit(poolSize),
+			ydb.WithBalancer(bconf),
 			ydb.WithSessionPoolIdleThreshold(time.Hour), ydbAuth(authMode, q, u))
 	}()
 	if err != nil {
