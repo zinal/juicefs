@@ -370,11 +370,10 @@ func (tx *ydbkvTxn) set(key, value []byte) {
 	}
 }
 
-func (tx *ydbkvTxn) append(key []byte, value []byte) []byte {
+func (tx *ydbkvTxn) append(key []byte, value []byte) {
 	old := tx.get(key)
 	new := append(old, value...)
 	tx.set(key, new)
-	return new
 }
 
 func (tx *ydbkvTxn) incrBy(key []byte, value int64) int64 {
