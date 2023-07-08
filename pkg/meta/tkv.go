@@ -46,7 +46,7 @@ type kvtxn interface {
 	scan(begin, end []byte, keysOnly bool, handler func(k, v []byte) bool)
 	exist(prefix []byte) bool
 	set(key, value []byte)
-	append(key []byte, value []byte) []byte
+	append(key []byte, value []byte)
 	incrBy(key []byte, value int64) int64
 	delete(key []byte)
 }
@@ -871,6 +871,9 @@ func (m *kvMeta) doSetAttr(ctx Context, inode Ino, set uint16, sugidclearmode ui
 			return syscall.ENOENT
 		}
 		m.parseAttr(a, &cur)
+		if cur.Parent > TrashInode {
+			return syscall.EPERM
+		}
 		now := time.Now()
 		dirtyAttr, st := m.mergeAttr(ctx, inode, set, &cur, attr, now)
 		if st != 0 {
@@ -905,7 +908,7 @@ func (m *kvMeta) Truncate(ctx Context, inode Ino, flags uint8, length uint64, at
 		}
 		t = Attr{}
 		m.parseAttr(a, &t)
-		if t.Typ != TypeFile {
+		if t.Typ != TypeFile || t.Flags&(FlagImmutable|t.Flags&FlagAppend) != 0 || t.Parent > TrashInode {
 			return syscall.EPERM
 		}
 		if !skipPermCheck {
@@ -998,10 +1001,7 @@ func (m *kvMeta) Fallocate(ctx Context, inode Ino, mode uint8, off uint64, size 
 		if t.Typ == TypeFIFO {
 			return syscall.EPIPE
 		}
-		if t.Typ != TypeFile {
-			return syscall.EPERM
-		}
-		if (t.Flags & FlagImmutable) != 0 {
+		if t.Typ != TypeFile || (t.Flags&FlagImmutable) != 0 {
 			return syscall.EPERM
 		}
 		if (t.Flags&FlagAppend) != 0 && (mode&^fallocKeepSize) != 0 {
@@ -1126,6 +1126,9 @@ func (m *kvMeta) doMknod(ctx Context, parent Ino, name string, _type uint8, mode
 		m.parseAttr(a, &pattr)
 		if pattr.Typ != TypeDirectory {
 			return syscall.ENOTDIR
+		}
+		if pattr.Parent > TrashInode {
+			return syscall.ENOENT
 		}
 		if st := m.Access(ctx, parent, MODE_MASK_W, &pattr); st != 0 {
 			return st
@@ -1505,6 +1508,9 @@ func (m *kvMeta) doRename(ctx Context, parentSrc Ino, nameSrc string, parentDst 
 		if dattr.Typ != TypeDirectory {
 			return syscall.ENOTDIR
 		}
+		if flags&RenameRestore == 0 && dattr.Parent > TrashInode {
+			return syscall.ENOENT
+		}
 		if st := m.Access(ctx, parentDst, MODE_MASK_W|MODE_MASK_X, &dattr); st != 0 {
 			return st
 		}
@@ -1527,7 +1533,7 @@ func (m *kvMeta) doRename(ctx Context, parentSrc Ino, nameSrc string, parentDst 
 		var supdate, dupdate bool
 		now := time.Now()
 		if dbuf != nil {
-			if flags == RenameNoReplace {
+			if flags&RenameNoReplace != 0 {
 				return syscall.EEXIST
 			}
 			dtyp, dino = m.parseEntry(dbuf)
@@ -1716,6 +1722,9 @@ func (m *kvMeta) doLink(ctx Context, inode, parent Ino, name string, attr *Attr)
 		m.parseAttr(rs[0], &pattr)
 		if pattr.Typ != TypeDirectory {
 			return syscall.ENOTDIR
+		}
+		if pattr.Parent > TrashInode {
+			return syscall.ENOENT
 		}
 		if st := m.Access(ctx, parent, MODE_MASK_W, &pattr); st != 0 {
 			return st
@@ -3232,9 +3241,11 @@ func (m *kvMeta) LoadMeta(r io.Reader) error {
 		go func() {
 			defer wg.Done()
 			var buffer []*pair
+			var total int
 			for p := range kv {
 				buffer = append(buffer, p)
-				if len(buffer) >= batch {
+				total += len(p.key) + len(p.value)
+				if len(buffer) >= batch || total > 5<<20 {
 					err := m.txn(func(tx *kvTxn) error {
 						for _, p := range buffer {
 							tx.set(p.key, p.value)
@@ -3245,6 +3256,7 @@ func (m *kvMeta) LoadMeta(r io.Reader) error {
 						logger.Fatalf("write %d pairs: %s", len(buffer), err)
 					}
 					buffer = buffer[:0]
+					total = 0
 				}
 			}
 			if len(buffer) > 0 {
@@ -3459,6 +3471,9 @@ func (m *kvMeta) doAttachDirNode(ctx Context, parent Ino, inode Ino, name string
 		m.parseAttr(a, &pattr)
 		if pattr.Typ != TypeDirectory {
 			return syscall.ENOTDIR
+		}
+		if pattr.Parent > TrashInode {
+			return syscall.ENOENT
 		}
 		if (pattr.Flags & FlagImmutable) != 0 {
 			return syscall.EPERM
